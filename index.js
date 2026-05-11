@@ -97,9 +97,9 @@ client.on('message_create', async (msg) => {
       `📰 *!news* — Últimas notícias CS2\n` +
       `🏆 *!resultados* — Últimos 5 placares\n` +
       `🔍 *!jogo [time]* — Agenda de partidas\n` +
-      `🔴 *!narrar [time]* — Narração ao vivo (placar + KDA a cada 2 rounds)\n` +
-      `🛑 *!parar* — Interrompe a narração\n\n` +
-      `_Time padrão: ${TEAM_NAME}_\n` +
+      //`🔴 *!narrar [time]* — Narração ao vivo (placar + KDA a cada 2 rounds)\n` +
+      //`🛑 *!parar* — Interrompe a narração\n\n` +
+      //`_Time padrão: ${TEAM_NAME}_\n` +
       `_Atualização: a cada ~45 segundos_`
     );
   }
@@ -131,7 +131,7 @@ client.on('message_create', async (msg) => {
     return msg.reply('🛑 *Narração encerrada!*');
   }
  
-  // ── !narrar ───────────────────────────────────────────────────
+  /* ── !narrar ───────────────────────────────────────────────────
   if (comando === '!narrar') {
     const time = argTime || TEAM_NAME;
  
@@ -212,6 +212,7 @@ client.on('message_create', async (msg) => {
  
     return;
   }
+    */
 });
  
 // ─── Inicialização ────────────────────────────────────────────────
