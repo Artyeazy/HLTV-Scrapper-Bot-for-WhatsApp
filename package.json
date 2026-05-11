@@ -1,0 +1,26 @@
+{
+  "name": "cs2-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp para narração ao vivo de partidas de CS2 via HLTV",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "cs2",
+    "hltv",
+    "bot",
+    "esports"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "hltv-next": "^3.5.16",
+    "node-fetch": "^2.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}

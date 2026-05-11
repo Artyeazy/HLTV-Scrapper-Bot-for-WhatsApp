@@ -1,0 +1,17 @@
+# Dependências
+node_modules/
+
+# Sessão salva do WhatsApp (não commitar — contém dados de autenticação)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Variáveis de ambiente (nunca commitar!)
+.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
