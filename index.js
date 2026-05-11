@@ -1,255 +1,223 @@
 /**
  * index.js
  * ─────────────────────────────────────────────────────────────────
- * Ponto de entrada do Bot de WhatsApp para narração de CS2.
- * Instancia o cliente do WhatsApp, registra os handlers de eventos
- * e processa os comandos enviados nos chats.
+ * Bot de WhatsApp para narração de CS2 via HLTV (HTTP Polling).
  * ─────────────────────────────────────────────────────────────────
  */
-
-// Carrega as variáveis de ambiente do arquivo .env
+ 
 require('dotenv').config();
-
+ 
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode                = require('qrcode-terminal');
 const {
   getFormattedNews,
   getFormattedResults,
   getLiveMatchByTeam,
-  connectScorebot,
-  buscarJogosDoTime // <-- Adicione aqui também
+  buscarJogosDoTime,
+  startPolling,
 } = require('./hltv-service');
-
+ 
 // ─── Configuração ─────────────────────────────────────────────────
-
-/** Time a ser monitorado pelo comando !narrar (definido no .env) */
-const TEAM_NAME = process.env.TEAM_NAME || 'Furia';
-
-/**
- * Controla se já existe uma narração ativa, evitando conexões
- * duplicadas ao Scorebot quando o usuário digita !narrar novamente.
- */
-let narracaoAtiva = false;
-
-// ─── Inicialização do Cliente WhatsApp ───────────────────────────
-
+ 
+const PHONE_NUMBER = process.env.PHONE_NUMBER; // Ex: 5547999999999
+const TEAM_NAME    = process.env.TEAM_NAME || 'Furia';
+ 
+// ─── Estado Global ────────────────────────────────────────────────
+ 
+let narracaoAtiva  = false;
+let stopPolling    = null;   // função retornada por startPolling() para cancelar
+let ultimaExecucao = 0;      // cooldown anti-spam
+ 
+// ─── Cliente WhatsApp ─────────────────────────────────────────────
+ 
 const client = new Client({
-  authStrategy: new LocalAuth({
-    clientId: 'cs2-bot', 
-  }),
+  authStrategy: new LocalAuth({ clientId: 'cs2-bot' }),
   webVersionCache: {
     type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+    remotePath:
+      'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
   },
   puppeteer: {
     headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',    
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--ignore-certificate-errors'
-    ],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
   },
-}); // <--- O ERRO ESTAVA AQUI! Provavelmente faltou esse fechamento.
-
+});
+ 
 // ─── Eventos do Cliente ───────────────────────────────────────────
-
-client.on('qr', (qr) => {
-  console.log('\n📱 Escaneie o QR Code abaixo com seu WhatsApp:\n');
-  qrcode.generate(qr, { small: true });
+ 
+client.on('qr', async () => {
+  if (!PHONE_NUMBER) {
+    console.log('\n⚠️  PHONE_NUMBER não definido no .env!');
+    console.log('   Adicione PHONE_NUMBER=55XXXXXXXXXXX no .env e reinicie.\n');
+    return;
+  }
+  try {
+    const code = await client.requestPairingCode(PHONE_NUMBER);
+    console.log(`\n╔══════════════════════════════════════╗`);
+    console.log(`║  CÓDIGO DE CONEXÃO: ${code.padEnd(16)} ║`);
+    console.log(`╚══════════════════════════════════════╝`);
+    console.log('   WhatsApp → Dispositivos → Conectar → Código de 8 dígitos\n');
+  } catch (err) {
+    console.error('❌ Erro ao gerar código de pareamento:', err.message);
+  }
 });
-
-/**
- * Evento: 'authenticated'
- * Disparado quando o login é feito com sucesso.
- */
-client.on('authenticated', () => {
-  console.log('✅ Autenticado com sucesso!');
-});
-
-/**
- * Evento: 'auth_failure'
- * Disparado quando a autenticação falha (sessão expirada, etc.).
- */
-client.on('auth_failure', (msg) => {
-  console.error('❌ Falha na autenticação:', msg);
-  console.log('   Apague a pasta .wwebjs_auth/ e reinicie para gerar um novo QR Code.');
-});
-
-/**
- * Evento: 'ready'
- * Disparado quando o cliente está pronto para enviar/receber mensagens.
- */
+ 
+client.on('authenticated', () => console.log('✅ Autenticado com sucesso!'));
+ 
 client.on('ready', () => {
-  console.log('─────────────────────────────────────────');
-  console.log('🤖 Bot CS2 está ONLINE e pronto!');
-  console.log(`🎯 Time monitorado: ${TEAM_NAME}`);
-  console.log('─────────────────────────────────────────');
-  console.log('Comandos disponíveis:');
-  console.log('  !news        → Últimas notícias CS2');
-  console.log('  !resultados  → Últimos resultados');
-  console.log('  !narrar      → Narração ao vivo da partida');
-  console.log('  !jogo [time] → Busca agenda de um time específico');
-  console.log('  !ajuda       → Lista de comandos');
+  console.log('\n─────────────────────────────────────────');
+  console.log('🤖 Bot CS2 ONLINE');
+  console.log(`🎯 Time padrão (.env): ${TEAM_NAME}`);
+  console.log('Comandos: !ajuda | !news | !resultados | !jogo | !narrar | !parar');
   console.log('─────────────────────────────────────────\n');
 });
-
-/**
- * Evento: 'disconnected'
- * Disparado quando a sessão é desconectada.
- */
-client.on('disconnected', (reason) => {
-  console.warn('⚠️  Cliente desconectado:', reason);
-});
-
-// ─── Handler Principal de Mensagens ──────────────────────────────
-
-/**
- * Evento: 'message'
- * Disparado para cada mensagem recebida em qualquer chat.
- * Aqui acontece o roteamento dos comandos do bot.
- */
+ 
+client.on('disconnected', reason => console.warn('⚠️  Desconectado:', reason));
+ 
+// ─── Handler de Mensagens ─────────────────────────────────────────
+ 
 client.on('message_create', async (msg) => {
-  const texto  = (msg.body || '').trim().toLowerCase();
-  const chatId = msg.from; // ID do chat para responder
-
-  // Ignora mensagens que não são comandos (não começam com '!')
+  const texto = (msg.body || '').trim().toLowerCase();
   if (!texto.startsWith('!')) return;
-
-  console.log(`[Bot] Comando recebido: "${msg.body}" de ${chatId}`);
-
-  // ── Comando: !ajuda ───────────────────────────────────────────
-  if (texto === '!ajuda' || texto === '!help') {
-    const ajuda =
-      `🤖 *Bot de Narração CS2*\n` +
-      `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `📰 *!news* — Últimas 5 notícias do CS2\n\n` +
-      `🏆 *!resultados* — Últimos 5 placares\n\n` +
-      `🔴 *!narrar* — Narração ao vivo da partida do *${TEAM_NAME}*\n\n` +
-      `🔍 *!jogo [time]* — Mostra jogos ao vivo ou agenda de um time (Ex: !jogo NAVI)\n\n` +
-      `❓ *!ajuda* — Exibe esta mensagem\n\n` +
-      `_Fonte: HLTV.org_`;
-
-    await msg.reply(ajuda);
-    return;
+ 
+  // Cooldown de 5s por usuário (baseado no chat)
+  const agora = Date.now();
+  if (agora - ultimaExecucao < 5000) return;
+  ultimaExecucao = agora;
+ 
+  const args    = texto.split(' ');
+  const comando = args[0];
+  const argTime = args.slice(1).join(' ').trim();
+ 
+  console.log(`[Bot] Comando: "${texto}"`);
+ 
+  // ── !ajuda ────────────────────────────────────────────────────
+  if (comando === '!ajuda' || comando === '!help') {
+    return msg.reply(
+      `🤖 *Bot de Narração CS2*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📰 *!news* — Últimas notícias CS2\n` +
+      `🏆 *!resultados* — Últimos 5 placares\n` +
+      `🔍 *!jogo [time]* — Agenda de partidas\n` +
+      `🔴 *!narrar [time]* — Narração ao vivo (placar + KDA a cada 2 rounds)\n` +
+      `🛑 *!parar* — Interrompe a narração\n\n` +
+      `_Time padrão: ${TEAM_NAME}_\n` +
+      `_Atualização: a cada ~45 segundos_`
+    );
   }
-
-// ── Comando: !jogo [Time] ou !partida [Time] ──────────────────
-  if (texto.startsWith('!jogo') || texto.startsWith('!partida')) {
-    // Pega o que o usuário digitou depois do comando (ex: "navi" ou "imperial")
-    const argumentoTime = msg.body.split(' ').slice(1).join(' ');
-
-    if (!argumentoTime) {
-      await msg.reply('⚠️ Por favor, diga qual time quer buscar.\nExemplo: *!jogo NAVI* ou *!partida Imperial*');
-      return;
-    }
-
-    await msg.reply(`🔍 Buscando agenda do *${argumentoTime}* na HLTV...`);
-
-    try {
-      const resposta = await buscarJogosDoTime(argumentoTime);
-      await msg.reply(resposta);
-    } catch (erro) {
-      console.error('[Bot] Erro no comando !jogo:', erro.message);
-      await msg.reply('❌ Erro ao buscar os jogos. A HLTV pode estar bloqueando a conexão agora.');
-    }
-    return;
+ 
+  // ── !news ─────────────────────────────────────────────────────
+  if (comando === '!news' || comando === '!noticias') {
+    await msg.reply('⏳ Buscando notícias...');
+    return msg.reply(await getFormattedNews());
   }
-
-  // ── Comando: !news ────────────────────────────────────────────
-  if (texto === '!news' || texto === '!noticias') {
-    await msg.reply('⏳ Buscando últimas notícias...');
-
-    try {
-      const resposta = await getFormattedNews();
-      await msg.reply(resposta);
-    } catch (erro) {
-      console.error('[Bot] Erro no comando !news:', erro.message);
-      await msg.reply('❌ Erro ao buscar notícias. Tente novamente.');
-    }
-    return;
+ 
+  // ── !resultados ───────────────────────────────────────────────
+  if (comando === '!resultados' || comando === '!results') {
+    await msg.reply('⏳ Buscando resultados...');
+    return msg.reply(await getFormattedResults());
   }
-
-  // ── Comando: !resultados ──────────────────────────────────────
-  if (texto === '!resultados' || texto === '!results') {
-    await msg.reply('⏳ Buscando últimos resultados...');
-
-    try {
-      const resposta = await getFormattedResults();
-      await msg.reply(resposta);
-    } catch (erro) {
-      console.error('[Bot] Erro no comando !resultados:', erro.message);
-      await msg.reply('❌ Erro ao buscar resultados. Tente novamente.');
-    }
-    return;
+ 
+  // ── !jogo ─────────────────────────────────────────────────────
+  if (comando === '!jogo' || comando === '!partida') {
+    const time = argTime || TEAM_NAME;
+    await msg.reply(`🔍 Buscando agenda de *${time}*...`);
+    return msg.reply(await buscarJogosDoTime(time));
   }
-
-  // ── Comando: !narrar ──────────────────────────────────────────
-  if (texto.startsWith('!narrar')) {
+ 
+  // ── !parar ────────────────────────────────────────────────────
+  if (comando === '!parar') {
+    if (!narracaoAtiva) return msg.reply('⚠️ Nenhuma narração está rodando.');
+    narracaoAtiva = false;
+    if (stopPolling) { stopPolling(); stopPolling = null; }
+    return msg.reply('🛑 *Narração encerrada!*');
+  }
+ 
+  // ── !narrar ───────────────────────────────────────────────────
+  if (comando === '!narrar') {
+    const time = argTime || TEAM_NAME;
+ 
     if (narracaoAtiva) {
-      await msg.reply('⚠️ Já existe uma narração ativa. Aguarde o fim da partida ou reinicie o bot.');
-      return;
+      return msg.reply(
+        `⚠️ Já existe uma narração ativa!\nUse *!parar* antes de iniciar outra.`
+      );
     }
-
-    // Pega o nome do time digitado após o comando (ex: !narrar paiN)
-    // Se não digitar nada, ele usa o TEAM_NAME do seu .env
-    const args = msg.body.split(' ');
-    const timeEscolhido = args.length > 1 ? args.slice(1).join(' ') : TEAM_NAME;
-
-    await msg.reply(`🔍 Buscando partida ao vivo para: *${timeEscolhido}*...`);
-
-    try {
-      // Passamos o timeEscolhido para a função de busca
-      const partida = await getLiveMatchByTeam(timeEscolhido);
-
-      if (!partida) {
-        await msg.reply(`❌ Não encontrei nenhuma partida ao vivo para *${timeEscolhido}* na HLTV agora.`);
-        return;
-      }
-
-      const chat = await msg.getChat();
-      narracaoAtiva = true;
-
-      await msg.reply(`✅ Partida encontrada!\n🎮 *${partida.team1.name}* vs *${partida.team2.name}*\n🏆 ${partida.event.name}\n\n🛰️ Conectando ao Scorebot...`);
-
-      await connectScorebot(partida.id, async (mensagem) => {
+ 
+    await msg.reply(`🔍 Buscando partida ao vivo de *${time}*...`);
+    console.log(`[Bot] Buscando partida ao vivo: "${time}"`);
+ 
+    // 1. Localiza a partida ao vivo
+    const partida = await getLiveMatchByTeam(time);
+ 
+    if (!partida) {
+      console.log(`[Bot] Nenhuma partida ao vivo encontrada para "${time}".`);
+      return msg.reply(
+        `😴 *${time}* não está jogando ao vivo agora.\n\nUse *!jogo ${time}* para ver a agenda.`
+      );
+    }
+ 
+    const t1     = partida.team1?.name || 'Time 1';
+    const t2     = partida.team2?.name || 'Time 2';
+    const evento = partida.event?.name || 'Evento';
+ 
+    // liveScore vem direto do getMatches() — placar imediato sem request extra
+    const s1 = partida.liveScore?.team1 ?? 0;
+    const s2 = partida.liveScore?.team2 ?? 0;
+ 
+    console.log(`[Bot] ✅ Partida encontrada! ${t1} vs ${t2} | ID: ${partida.id} | Placar inicial: ${s1}x${s2}`);
+ 
+    const chat = await msg.getChat();
+ 
+    await chat.sendMessage(
+      `🎮 *PARTIDA ENCONTRADA!*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `⚔️ *${t1}* vs *${t2}*\n` +
+      `📍 ${evento}\n` +
+      `📊 Placar atual: *${t1} ${s1} x ${s2} ${t2}*\n\n` +
+      `🔄 Iniciando monitoramento por polling...\n` +
+      `_KDA a cada 2 rounds (~45s de delay)_`
+    );
+ 
+    narracaoAtiva = true;
+ 
+    // 2. Inicia o polling e armazena a função stop()
+    stopPolling = startPolling(
+      partida.id,
+ 
+      // onUpdate — chamado a cada 2 rounds com o pacote formatado
+      async (mensagem) => {
+        if (!narracaoAtiva) return;
         try {
           await chat.sendMessage(mensagem);
-        } catch (errEnvio) {
-          console.error('[Bot] Erro ao enviar mensagem:', errEnvio.message);
+        } catch (err) {
+          console.error('[Bot] Erro ao enviar mensagem de update:', err.message);
         }
-
-        if (mensagem.includes('Narração encerrada') || mensagem.includes('PARTIDA ENCERRADA')) {
-          narracaoAtiva = false;
+      },
+ 
+      // onEnd — chamado quando a partida encerra ou ocorre erro fatal
+      async (errMsg) => {
+        narracaoAtiva = false;
+        stopPolling   = null;
+ 
+        const textoFinal = errMsg
+          ? `❌ *Narração encerrada por erro:*\n_${errMsg}_`
+          : `🏁 *Partida encerrada!*\nNarração finalizada automaticamente.`;
+ 
+        console.log(`[Bot] Narração encerrada. Erro: ${errMsg || 'nenhum'}`);
+ 
+        try {
+          await chat.sendMessage(textoFinal);
+        } catch (err) {
+          console.error('[Bot] Erro ao enviar mensagem final:', err.message);
         }
-      });
-
-    } catch (erro) {
-      narracaoAtiva = false;
-      console.error('[Bot] Erro no comando !narrar:', erro.message);
-      await msg.reply('❌ Erro ao iniciar a narração. Verifique os logs.');
-    }
+      }
+    );
+ 
     return;
   }
-
-  // ── Comando não reconhecido ───────────────────────────────────
-  // Apenas comenta no log; não responde no chat para não ser intrusivo
-  console.log(`[Bot] Comando desconhecido: "${msg.body}"`);
 });
-
+ 
 // ─── Inicialização ────────────────────────────────────────────────
-
-/**
- * Inicia o cliente do WhatsApp.
- * O Puppeteer abrirá em background e, se necessário,
- * o QR Code será exibido no terminal.
- */
-console.log('🚀 Iniciando Bot CS2 WhatsApp...');
-console.log(`🎯 Monitorando time: ${TEAM_NAME}`);
-console.log('   Aguarde o QR Code ou a confirmação de sessão salva...\n');
-
+ 
+console.log('🚀 Iniciando Bot CS2...');
+console.log(`🎯 Time padrão: ${TEAM_NAME}`);
+if (!PHONE_NUMBER) console.warn('⚠️  PHONE_NUMBER não definido no .env — código de pareamento não funcionará.');
 client.initialize();
+ 

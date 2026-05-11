@@ -1,0 +1,8 @@
+# Número do WhatsApp para autenticação via Pairing Code
+# Formato: código do país + DDD + número (sem '+', espaços ou traços)
+# Exemplo: 5547999999999
+PHONE_NUMBER=5547997028628
+
+# Time padrão monitorado pelo comando !narrar (sem argumento)
+# Exemplos: Furia, NAVI, Vitality, G2, NIP
+TEAM_NAME=
