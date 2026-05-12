@@ -13,19 +13,20 @@ const {
   getFormattedResults,
   getLiveMatchByTeam,
   buscarJogosDoTime,
+  getTeamInfo, // <-- Importação da nova função
   startPolling,
 } = require('./hltv-service');
  
 // ─── Configuração ─────────────────────────────────────────────────
  
-const PHONE_NUMBER = process.env.PHONE_NUMBER; // Ex: 5547999999999
-const TEAM_NAME    = process.env.TEAM_NAME || 'Furia';
+const PHONE_NUMBER = process.env.PHONE_NUMBER; 
+const TEAM_NAME    = process.env.TEAM_NAME || '';
  
 // ─── Estado Global ────────────────────────────────────────────────
  
 let narracaoAtiva  = false;
-let stopPolling    = null;   // função retornada por startPolling() para cancelar
-let ultimaExecucao = 0;      // cooldown anti-spam
+let stopPolling    = null;   
+let ultimaExecucao = 0;      
  
 // ─── Cliente WhatsApp ─────────────────────────────────────────────
  
@@ -66,8 +67,8 @@ client.on('authenticated', () => console.log('✅ Autenticado com sucesso!'));
 client.on('ready', () => {
   console.log('\n─────────────────────────────────────────');
   console.log('🤖 Bot CS2 ONLINE');
-  console.log(`🎯 Time padrão (.env): ${TEAM_NAME}`);
-  console.log('Comandos: !ajuda | !news | !resultados | !jogo | !narrar | !parar');
+  console.log(`🎯 Time padrão (.env): ${TEAM_NAME || 'Nenhum'}`);
+  console.log('Comandos: !ajuda | !news | !resultados | !agenda | !time | !narrar | !parar');
   console.log('─────────────────────────────────────────\n');
 });
  
@@ -88,19 +89,17 @@ client.on('message_create', async (msg) => {
   const comando = args[0];
   const argTime = args.slice(1).join(' ').trim();
  
-  console.log(`[Bot] Comando: "${texto}"`);
+  console.log(`[Bot] Comando recebido: "${texto}"`);
  
   // ── !ajuda ────────────────────────────────────────────────────
   if (comando === '!ajuda' || comando === '!help') {
     return msg.reply(
-      `🤖 *Bot de Narração CS2*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `🤖 *Bot de Informações sobre CS2*\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `📰 *!news* — Últimas notícias CS2\n` +
-      `🏆 *!resultados* — Últimos 5 placares\n` +
-      `🔍 *!jogo [time]* — Agenda de partidas\n` +
-      //`🔴 *!narrar [time]* — Narração ao vivo (placar + KDA a cada 2 rounds)\n` +
-      //`🛑 *!parar* — Interrompe a narração\n\n` +
-      //`_Time padrão: ${TEAM_NAME}_\n` +
-      `_Atualização: a cada ~45 segundos_`
+      `🏆 *!resultados* — Jogos ao vivo + Últimos placares\n` +
+      `🛡️ *!time [nome]* — Ranking, Line-up e Últimos jogos\n` +
+      `📅 *!agenda [nome]* — Próximas partidas\n` +
+      `⚠️ *!narrar* — Função temporariamente desativada\n`
     );
   }
  
@@ -112,15 +111,24 @@ client.on('message_create', async (msg) => {
  
   // ── !resultados ───────────────────────────────────────────────
   if (comando === '!resultados' || comando === '!results') {
-    await msg.reply('⏳ Buscando resultados...');
+    await msg.reply('⏳ Analisando a HLTV...');
     return msg.reply(await getFormattedResults());
   }
  
-  // ── !jogo ─────────────────────────────────────────────────────
-  if (comando === '!jogo' || comando === '!partida') {
+  // ── !agenda (Antigo !jogo) ────────────────────────────────────
+  if (comando === '!agenda') {
     const time = argTime || TEAM_NAME;
+    if (!time) return msg.reply('⚠️ Especifique o time! Ex: *!agenda furia*');
     await msg.reply(`🔍 Buscando agenda de *${time}*...`);
     return msg.reply(await buscarJogosDoTime(time));
+  }
+
+  // ── !time ─────────────────────────────────────────────────────
+  if (comando === '!time') {
+    const time = argTime || TEAM_NAME;
+    if (!time) return msg.reply('⚠️ Especifique o time! Ex: *!time navi*');
+    await msg.reply(`🔍 Puxando a ficha do time *${time}*...`);
+    return msg.reply(await getTeamInfo(time));
   }
  
   // ── !parar ────────────────────────────────────────────────────
@@ -131,7 +139,7 @@ client.on('message_create', async (msg) => {
     return msg.reply('🛑 *Narração encerrada!*');
   }
  
-  /* ── !narrar ───────────────────────────────────────────────────
+   //── !narrar ───────────────────────────────────────────────────
   if (comando === '!narrar') {
     const time = argTime || TEAM_NAME;
  
@@ -144,44 +152,20 @@ client.on('message_create', async (msg) => {
     await msg.reply(`🔍 Buscando partida ao vivo de *${time}*...`);
     console.log(`[Bot] Buscando partida ao vivo: "${time}"`);
  
-    // 1. Localiza a partida ao vivo
     const partida = await getLiveMatchByTeam(time);
  
     if (!partida) {
       console.log(`[Bot] Nenhuma partida ao vivo encontrada para "${time}".`);
       return msg.reply(
-        `😴 *${time}* não está jogando ao vivo agora.\n\nUse *!jogo ${time}* para ver a agenda.`
+        `😴 *${time}* não está jogando ao vivo agora.\n\nUse *!agenda ${time}* para ver os próximos jogos.`
       );
     }
  
-    const t1     = partida.team1?.name || 'Time 1';
-    const t2     = partida.team2?.name || 'Time 2';
-    const evento = partida.event?.name || 'Evento';
- 
-    // liveScore vem direto do getMatches() — placar imediato sem request extra
-    const s1 = partida.liveScore?.team1 ?? 0;
-    const s2 = partida.liveScore?.team2 ?? 0;
- 
-    console.log(`[Bot] ✅ Partida encontrada! ${t1} vs ${t2} | ID: ${partida.id} | Placar inicial: ${s1}x${s2}`);
- 
     const chat = await msg.getChat();
- 
-    await chat.sendMessage(
-      `🎮 *PARTIDA ENCONTRADA!*\n━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `⚔️ *${t1}* vs *${t2}*\n` +
-      `📍 ${evento}\n` +
-      `📊 Placar atual: *${t1} ${s1} x ${s2} ${t2}*\n\n` +
-      `🔄 Iniciando monitoramento por polling...\n` +
-      `_KDA a cada 2 rounds (~45s de delay)_`
-    );
- 
     narracaoAtiva = true;
  
-    // 2. Inicia o polling e armazena a função stop()
     stopPolling = startPolling(
       partida.id,
- 
-      // onUpdate — chamado a cada 2 rounds com o pacote formatado
       async (mensagem) => {
         if (!narracaoAtiva) return;
         try {
@@ -190,8 +174,6 @@ client.on('message_create', async (msg) => {
           console.error('[Bot] Erro ao enviar mensagem de update:', err.message);
         }
       },
- 
-      // onEnd — chamado quando a partida encerra ou ocorre erro fatal
       async (errMsg) => {
         narracaoAtiva = false;
         stopPolling   = null;
@@ -212,13 +194,8 @@ client.on('message_create', async (msg) => {
  
     return;
   }
-    */
 });
  
 // ─── Inicialização ────────────────────────────────────────────────
- 
 console.log('🚀 Iniciando Bot CS2...');
-console.log(`🎯 Time padrão: ${TEAM_NAME}`);
-if (!PHONE_NUMBER) console.warn('⚠️  PHONE_NUMBER não definido no .env — código de pareamento não funcionará.');
 client.initialize();
- 
